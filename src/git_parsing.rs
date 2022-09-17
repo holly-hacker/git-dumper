@@ -1,12 +1,14 @@
 use anyhow::{anyhow, bail, Result};
 use miniz_oxide::inflate::TINFLStatus;
 use regex::Regex;
-use std::fmt::Write;
+use std::{collections::HashSet, fmt::Write};
 
 lazy_static::lazy_static! {
-    static ref REGEX_HASH: Regex = Regex::new(r"[a-f\d]{40}").unwrap();
-    static ref REGEX_REFS_PATH: Regex = Regex::new(r"refs/heads/(\S+)").unwrap();
+    static ref REGEX_HASH: Regex = Regex::new(r"^[a-f\d]{40}$").unwrap();
+    static ref REGEX_REFS_PATH: Regex = Regex::new(r"^refs/heads/(\S+)$").unwrap();
 }
+
+const EMPTY_HASH: &str = "0000000000000000000000000000000000000000";
 
 pub enum GitObject {
     Tree(Vec<String>),
@@ -90,6 +92,27 @@ pub fn parse_object(data: &[u8]) -> Result<GitObject> {
             String::from_utf8_lossy(&peek)
         ),
     }
+}
+
+pub fn parse_log(data: &[u8]) -> Result<HashSet<String>> {
+    let mut set = HashSet::new();
+
+    let content = String::from_utf8_lossy(data);
+
+    for line in content.lines() {
+        let (hash1, rest) = line.split_once(' ').unwrap_or(("", ""));
+        let (hash2, _) = rest.split_once(' ').unwrap_or(("", ""));
+
+        if REGEX_HASH.is_match(hash1) && hash1 != EMPTY_HASH {
+            set.insert(hash1.into());
+        }
+
+        if REGEX_HASH.is_match(hash2) && hash2 != EMPTY_HASH {
+            set.insert(hash2.into());
+        }
+    }
+
+    Ok(set)
 }
 
 fn peek_object_type(data: &[u8]) -> Result<[u8; 6]> {

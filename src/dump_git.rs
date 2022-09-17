@@ -4,7 +4,7 @@ use regex::Regex;
 use reqwest::StatusCode;
 use tokio::sync::mpsc::{self, Sender};
 
-use crate::git_parsing::{parse_hash, parse_head, parse_object, GitObject};
+use crate::git_parsing::{parse_hash, parse_head, parse_log, parse_object, GitObject};
 
 lazy_static::lazy_static! {
     static ref REGEX_OBJECT_PATH: Regex = Regex::new(r"[\da-f]{2}/[\da-f]{38}").unwrap();
@@ -22,6 +22,7 @@ const START_FILES: &[&str] = &[
     "index",
     "ORIG_HEAD",
     "packed-refs",
+    "refs/remotes/origin/HEAD", // guessing remote names seems pointless, it's `origin` 99% of the time
 ];
 
 // TODO: brute-force files based on known and unknown branch names
@@ -59,21 +60,27 @@ impl DownloadCache {
             let got = reqwest::get(&url).await;
             match got {
                 Ok(resp) => {
-                    if resp.status() == StatusCode::OK {
-                        let bytes = resp.bytes().await.unwrap(); // TODO: ugh, fix this unwrap
-                        sender
-                            .send(DownloadedFile {
-                                name: file_name,
-                                content: bytes.to_vec(),
-                                sender: sender.clone(),
-                            })
-                            .await
-                            .unwrap();
-                    } else {
-                        println!(
-                            "Error while trying to download {url}: status code is {}",
-                            resp.status()
-                        );
+                    match resp.status() {
+                        StatusCode::OK => {
+                            let bytes = resp.bytes().await.unwrap(); // TODO: ugh, fix this unwrap
+                            sender
+                                .send(DownloadedFile {
+                                    name: file_name,
+                                    content: bytes.to_vec(),
+                                    sender: sender.clone(),
+                                })
+                                .await
+                                .unwrap();
+                        }
+                        StatusCode::NOT_FOUND => {
+                            println!("Got 404 while trying to download {url}")
+                        }
+                        _ => {
+                            println!(
+                                "Error while trying to download {url}: status code is {}",
+                                resp.status()
+                            )
+                        }
                     }
                 }
                 Err(e) => {
@@ -142,29 +149,32 @@ pub async fn download_all(base_url: String, base_path: PathBuf) {
         );
 
         match message.name.as_str() {
-            "HEAD" => match parse_head(&message.content) {
+            "HEAD" | "refs/remotes/origin/HEAD" => match parse_head(&message.content) {
                 Ok(ref_path) => {
                     println!("\tFound ref path {ref_path}");
                     cache.download(ref_path, message.sender.clone());
                 }
-                Err(err) => todo!("{:?}", err),
+                Err(err) => println!("Failed to parse file {}: {:?}", message.name, err),
             },
-            "ORIG_HEAD" => match parse_hash(&message.content) {
-                Ok(hash) => {
-                    println!("\tFound object hash {hash}");
-                    cache.download_object(hash, message.sender.clone());
+            n if n.starts_with("refs/heads/") || n == "ORIG_HEAD" => {
+                match parse_hash(&message.content) {
+                    Ok(hash) => {
+                        println!("\tFound object hash {hash}");
+                        cache.download_object(hash, message.sender.clone());
+                    }
+                    Err(err) => println!("Failed to parse file {}: {:?}", message.name, err),
                 }
-                Err(err) => todo!("{:?}", err),
-            },
-            n if n.starts_with("refs/heads/") => match parse_hash(&message.content) {
-                Ok(hash) => {
-                    println!("\tFound object hash {hash}");
-                    let hash_start = &hash[0..2];
-                    let hash_end = &hash[2..];
-                    let path = format!("objects/{hash_start}/{hash_end}");
-                    cache.download(&path, message.sender.clone());
+            }
+            // TODO: handle FETCH_HEAD, detect branches
+            // TODO: handle config, detect branches
+            n if n.starts_with("logs/") => match parse_log(&message.content) {
+                Ok(hashes) => {
+                    println!("\tFound log with {} hashes", hashes.len());
+                    for hash in hashes {
+                        cache.download_object(&hash, message.sender.clone());
+                    }
                 }
-                Err(err) => todo!("{:?}", err),
+                Err(err) => println!("Failed to parse file {}: {:?}", message.name, err),
             },
             n if n.starts_with("objects/") && REGEX_OBJECT_PATH.is_match(n) => {
                 match parse_object(&message.content) {
@@ -183,7 +193,7 @@ pub async fn download_all(base_url: String, base_path: PathBuf) {
                             cache.download_object(&hash, message.sender.clone());
                         }
                     }
-                    Err(err) => todo!("{:?}", err),
+                    Err(err) => println!("Failed to parse file {}: {:?}", message.name, err),
                 }
             }
             n => {
