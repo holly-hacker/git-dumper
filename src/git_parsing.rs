@@ -115,6 +115,8 @@ pub fn parse_log(data: &[u8]) -> Result<HashSet<String>> {
     Ok(set)
 }
 
+// pub fn
+
 fn peek_object_type(data: &[u8]) -> Result<[u8; 6]> {
     let mut array = [0u8; 6];
     match miniz_oxide::inflate::decompress_slice_iter_to_slice(
@@ -124,7 +126,7 @@ fn peek_object_type(data: &[u8]) -> Result<[u8; 6]> {
         true,
     ) {
         Ok(_) | Err(TINFLStatus::HasMoreOutput) => Ok(array),
-        Err(e) => bail!("Error while decompressing object file: {:?}", e),
+        Err(e) => bail!("Error while decompressing object file for peek: {:?}", e),
     }
 }
 

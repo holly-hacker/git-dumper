@@ -1,7 +1,8 @@
 use std::{collections::HashSet, path::PathBuf};
 
+use hyper::{body::HttpBody, Client, StatusCode};
+use hyper_tls::HttpsConnector;
 use regex::Regex;
-use reqwest::StatusCode;
 use tokio::sync::mpsc::{self, Sender};
 
 use crate::git_parsing::{parse_hash, parse_head, parse_log, parse_object, GitObject};
@@ -57,32 +58,32 @@ impl DownloadCache {
         let url = format!("{}{file_name}", self.base_url);
         let file_name = file_name.into();
         tokio::spawn(async move {
-            let got = reqwest::get(&url).await;
-            match got {
-                Ok(resp) => {
-                    match resp.status() {
-                        StatusCode::OK => {
-                            let bytes = resp.bytes().await.unwrap(); // TODO: ugh, fix this unwrap
-                            sender
-                                .send(DownloadedFile {
-                                    name: file_name,
-                                    content: bytes.to_vec(),
-                                    sender: sender.clone(),
-                                })
-                                .await
-                                .unwrap();
-                        }
-                        StatusCode::NOT_FOUND => {
-                            println!("Got 404 while trying to download {url}")
-                        }
-                        _ => {
-                            println!(
-                                "Error while trying to download {url}: status code is {}",
-                                resp.status()
-                            )
-                        }
+            let client = Client::builder().build::<_, hyper::Body>(HttpsConnector::new());
+            let resp = client.get(url.parse().unwrap()).await;
+            match resp {
+                Ok(resp) => match resp.status() {
+                    StatusCode::OK => {
+                        let bytes = hyper::body::to_bytes(resp).await.unwrap();
+
+                        sender
+                            .send(DownloadedFile {
+                                name: file_name,
+                                content: bytes.to_vec(),
+                                sender: sender.clone(),
+                            })
+                            .await
+                            .unwrap();
                     }
-                }
+                    StatusCode::NOT_FOUND => {
+                        println!("Got 404 while trying to download {url}")
+                    }
+                    _ => {
+                        println!(
+                            "Error while trying to download {url}: status code is {}",
+                            resp.status()
+                        )
+                    }
+                },
                 Err(e) => {
                     println!("Error while trying to download {url}: {e}");
                 }
