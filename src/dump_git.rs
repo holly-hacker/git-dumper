@@ -1,9 +1,13 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
-use hyper::{body::HttpBody, Client, StatusCode};
+use anyhow::{bail, Context, Result};
+use hyper::{Client, StatusCode};
 use hyper_tls::HttpsConnector;
 use regex::Regex;
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::git_parsing::{parse_hash, parse_head, parse_log, parse_object, GitObject};
 
@@ -28,94 +32,27 @@ const START_FILES: &[&str] = &[
 
 // TODO: brute-force files based on known and unknown branch names
 
-#[derive(Default)]
-struct DownloadCache {
-    /// The URL of the exposed .git directory
-    base_url: String,
-    /// The local path to download the git repo to
-    base_path: PathBuf,
-    cache: HashSet<String>,
-}
-
-impl DownloadCache {
-    fn new(base_url: String, base_path: PathBuf) -> Self {
-        Self {
-            base_url,
-            base_path,
-            cache: HashSet::new(),
-        }
-    }
-
-    /// Downloads a file if it hasn't been downloaded before and sends it to the given channel.
-    fn download(&mut self, file_name: &str, sender: Sender<DownloadedFile>) {
-        if self.cache.contains(file_name) {
-            // println!("Skipping download of file {file_name} as it's already downloaded");
-            return;
-        }
-
-        self.cache.insert(file_name.into());
-
-        let url = format!("{}{file_name}", self.base_url);
-        let file_name = file_name.into();
-        tokio::spawn(async move {
-            let client = Client::builder().build::<_, hyper::Body>(HttpsConnector::new());
-            let resp = client.get(url.parse().unwrap()).await;
-            match resp {
-                Ok(resp) => match resp.status() {
-                    StatusCode::OK => {
-                        let bytes = hyper::body::to_bytes(resp).await.unwrap();
-
-                        sender
-                            .send(DownloadedFile {
-                                name: file_name,
-                                content: bytes.to_vec(),
-                                sender: sender.clone(),
-                            })
-                            .await
-                            .unwrap();
-                    }
-                    StatusCode::NOT_FOUND => {
-                        println!("Got 404 while trying to download {url}")
-                    }
-                    _ => {
-                        println!(
-                            "Error while trying to download {url}: status code is {}",
-                            resp.status()
-                        )
-                    }
-                },
-                Err(e) => {
-                    println!("Error while trying to download {url}: {e}");
-                }
-            }
-        });
-    }
-
-    fn download_object(&mut self, object_hash: &str, sender: Sender<DownloadedFile>) {
-        let hash_start = &object_hash[0..2];
-        let hash_end = &object_hash[2..];
-        let path = format!("objects/{hash_start}/{hash_end}");
-        self.download(&path, sender)
-    }
-}
-
 #[derive(Debug)]
 struct DownloadedFile {
-    pub name: String,
-    pub content: Vec<u8>,
-    pub sender: Sender<DownloadedFile>,
+    pub path: String,
+    pub tx: UnboundedSender<DownloadedFile>,
 }
 
 pub async fn download_all(base_url: String, base_path: PathBuf) {
-    let mut cache = DownloadCache::new(base_url, base_path);
+    let mut cache = HashSet::<String>::new();
 
     // TODO: try out unbounded channel too
     // TODO: maybe just have a cli option that determines the limit of concurrent downloads instead?
-    let (tx, mut rx) = mpsc::channel(32);
+    let (tx, mut rx) = mpsc::unbounded_channel();
 
     for &file in START_FILES {
-        let new_tx = tx.clone();
-        cache.download(file, new_tx);
+        // let new_tx = tx.clone();
+        // cache.download(file, new_tx);
+        tx.send(DownloadedFile {
+            path: file.into(),
+            tx: tx.clone(),
+        })
+        .unwrap();
     }
 
     // drop the sender object so all senders can be out of scope by the end of the download
@@ -123,83 +60,158 @@ pub async fn download_all(base_url: String, base_path: PathBuf) {
 
     // every time we downloaded a new file, see what other files we can derive from it
     while let Some(message) = rx.recv().await {
+        // TODO: if this file is already downloaded, continue
+        if cache.contains(&message.path) {
+            // println!("Skipping download of file {file_name} as it's already downloaded");
+            continue;
+        }
+
+        cache.insert(message.path.clone());
+
+        let url = format!("{}{}", &base_url, &message.path);
+        let file_bytes = match download(&url).await {
+            Ok(content) => content,
+            Err(e) => {
+                println!("Error while downloading file {url}: {}", e);
+                continue;
+            }
+        };
+
+        println!("Downloaded '{}' ({} bytes)", message.path, file_bytes.len());
+
         // write this file to disk
-        let path = cache.base_path.join(".git").join(&message.name);
-        let path_parent = path
-            .parent()
-            .expect("There should be at least .git as parent");
+        if let Err(e) = write_file(&base_path, &message.path, &file_bytes) {
+            println!("Failed to write file {} to disk: {}", &message.path, e)
+        }
 
-        std::fs::create_dir_all(path_parent).unwrap_or_else(|e| {
-            println!(
-                "Error while trying to create directory {}: {:?}",
-                path_parent.to_string_lossy(),
-                e
-            );
-        });
-        std::fs::write(path, &message.content).unwrap_or_else(|e| {
-            println!(
-                "Error while trying to write {} to disk: {:?}",
-                message.name, e
-            );
-        });
-
-        println!(
-            "Downloaded '{}' ({} bytes)",
-            message.name,
-            message.content.len()
-        );
-
-        match message.name.as_str() {
-            "HEAD" | "refs/remotes/origin/HEAD" => match parse_head(&message.content) {
-                Ok(ref_path) => {
-                    println!("\tFound ref path {ref_path}");
-                    cache.download(ref_path, message.sender.clone());
-                }
-                Err(err) => println!("Failed to parse file {}: {:?}", message.name, err),
-            },
-            n if n.starts_with("refs/heads/") || n == "ORIG_HEAD" => {
-                match parse_hash(&message.content) {
-                    Ok(hash) => {
-                        println!("\tFound object hash {hash}");
-                        cache.download_object(hash, message.sender.clone());
-                    }
-                    Err(err) => println!("Failed to parse file {}: {:?}", message.name, err),
-                }
-            }
-            // TODO: handle FETCH_HEAD, detect branches
-            // TODO: handle config, detect branches
-            n if n.starts_with("logs/") => match parse_log(&message.content) {
-                Ok(hashes) => {
-                    println!("\tFound log with {} hashes", hashes.len());
-                    for hash in hashes {
-                        cache.download_object(&hash, message.sender.clone());
-                    }
-                }
-                Err(err) => println!("Failed to parse file {}: {:?}", message.name, err),
-            },
-            n if n.starts_with("objects/") && REGEX_OBJECT_PATH.is_match(n) => {
-                match parse_object(&message.content) {
-                    Ok(GitObject::Blob) => {
-                        println!("\tFound blob object");
-                    }
-                    Ok(GitObject::Tree(hashes)) => {
-                        println!("\tFound tree object with {} hashes", hashes.len());
-                        for hash in hashes {
-                            cache.download_object(&hash, message.sender.clone());
-                        }
-                    }
-                    Ok(GitObject::Commit(hashes)) => {
-                        println!("\tFound commit object with {} hashes", hashes.len());
-                        for hash in hashes {
-                            cache.download_object(&hash, message.sender.clone());
-                        }
-                    }
-                    Err(err) => println!("Failed to parse file {}: {:?}", message.name, err),
-                }
-            }
-            n => {
-                println!("\tNot using file '{n}' for anything right now");
-            }
+        // match on the file name and queue new messages
+        if let Err(e) = queue_new_references(message.path.as_str(), &file_bytes, message.tx) {
+            println!("Error while trying to find new references: {e}");
         }
     }
+}
+
+async fn download(url: &str) -> Result<Vec<u8>> {
+    let client = Client::builder().build::<_, hyper::Body>(HttpsConnector::new());
+    let resp = client.get(url.parse().unwrap()).await;
+    match resp {
+        Ok(resp) => match resp.status() {
+            StatusCode::OK => {
+                let bytes = hyper::body::to_bytes(resp).await.unwrap();
+                Ok(bytes.to_vec())
+            }
+            StatusCode::NOT_FOUND => {
+                bail!("Got 404 while trying to download {url}")
+            }
+            _ => {
+                bail!(
+                    "Error while trying to download {url}: status code is {}",
+                    resp.status()
+                )
+            }
+        },
+        Err(e) => {
+            bail!("Error while trying to download {url}: {e}");
+        }
+    }
+}
+
+fn write_file(base_path: &Path, message_name: &str, message_content: &[u8]) -> Result<()> {
+    let path = base_path.join(".git").join(message_name);
+    let path_parent = path
+        .parent()
+        .expect("There should be at least .git as parent");
+
+    std::fs::create_dir_all(path_parent).with_context(|| {
+        format!(
+            "Error while trying to create directory {}",
+            path_parent.to_string_lossy()
+        )
+    })?;
+    std::fs::write(path, &message_content)
+        .with_context(|| format!("Error while trying to write {} to disk", message_name))?;
+
+    Ok(())
+}
+
+fn queue_new_references(
+    name: &str,
+    content: &[u8],
+    tx: UnboundedSender<DownloadedFile>,
+) -> Result<()> {
+    match name {
+        "HEAD" | "refs/remotes/origin/HEAD" => {
+            let ref_path = parse_head(content)?;
+            println!("\tFound ref path {ref_path}");
+
+            tx.send(DownloadedFile {
+                path: ref_path.into(),
+                tx: tx.clone(),
+            })
+            .unwrap();
+        }
+        n if n.starts_with("refs/heads/") || n == "ORIG_HEAD" => {
+            let hash = parse_hash(content)?;
+            println!("\tFound object hash {hash}");
+
+            tx.send(DownloadedFile {
+                path: hash_to_url(hash),
+                tx: tx.clone(),
+            })
+            .unwrap();
+        }
+        // TODO: handle FETCH_HEAD, detect branches
+        // TODO: handle config, detect branches
+        n if n.starts_with("logs/") => {
+            let hashes = parse_log(content)?;
+
+            println!("\tFound log with {} hashes", hashes.len());
+            for hash in hashes {
+                tx.send(DownloadedFile {
+                    path: hash_to_url(&hash),
+                    tx: tx.clone(),
+                })
+                .unwrap();
+            }
+        }
+        n if n.starts_with("objects/") && REGEX_OBJECT_PATH.is_match(n) => {
+            match parse_object(content)? {
+                GitObject::Blob => {
+                    println!("\tFound blob object");
+                }
+                GitObject::Tree(hashes) => {
+                    println!("\tFound tree object with {} hashes", hashes.len());
+                    for hash in hashes {
+                        tx.send(DownloadedFile {
+                            path: hash_to_url(&hash),
+                            tx: tx.clone(),
+                        })
+                        .unwrap();
+                    }
+                }
+                GitObject::Commit(hashes) => {
+                    println!("\tFound commit object with {} hashes", hashes.len());
+                    for hash in hashes {
+                        tx.send(DownloadedFile {
+                            path: hash_to_url(&hash),
+                            tx: tx.clone(),
+                        })
+                        .unwrap();
+                    }
+                }
+            }
+        }
+        n => {
+            println!("\tNot using file '{n}' for anything right now");
+        }
+    }
+    Ok(())
+}
+
+fn hash_to_url(hash: &str) -> String {
+    assert_eq!(hash.len(), 40);
+    let hash_start = &hash[0..2];
+    let hash_end = &hash[2..];
+    let path = format!("objects/{hash_start}/{hash_end}");
+    path
 }
