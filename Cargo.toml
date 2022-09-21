@@ -3,6 +3,11 @@ name = "git-dumper"
 version = "0.1.0"
 edition = "2021"
 description = "A tool to dump exposed .git directories"
+license = "MIT"
+repository = "https://github.com/HoLLy-HaCKeR/git-dumper"
+keywords = ["git", "security", "scrapers"]
+categories = ["command-line-utilities"]
+exclude = [ "test-data" ]
 
 [profile.release]
 lto = true
