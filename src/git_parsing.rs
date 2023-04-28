@@ -59,21 +59,17 @@ pub fn parse_object(data: &[u8]) -> Result<GitObject> {
 
             // TODO: this is still ugly, use a more elegant approach instead
             let mut decompressed_iter = decompressed.iter().enumerate();
-            while let Some((offset, _)) = (&mut decompressed_iter)
-                .skip_while(|(_, &b)| b != 0)
-                .skip(1)
-                // this next() consumes the first chunk element from the iterator
-                .next()
+            while let Some((offset, _)) =
+                (&mut decompressed_iter).skip_while(|(_, &b)| b != 0).nth(1)
+            // this nth() consumes the first chunk element from the iterator
             {
                 // slice the array instead of cloning the bytes
                 let end = std::cmp::min(offset + chunk_size, decompressed.len());
                 let bytes = &decompressed[offset..end];
                 hashes.push(slice_to_hex(bytes));
 
-                (&mut decompressed_iter)
-                    .skip(chunk_size - 2)
-                    // this next() consumes the last chunk element from the iterator
-                    .next();
+                decompressed_iter.nth(chunk_size - 2);
+                // this nth() consumes the last chunk element from the iterator
                 // thus, we skip over the remaining (chunk - 2) bytes in between
             }
 
