@@ -55,6 +55,7 @@ pub fn parse_object(data: &[u8]) -> Result<GitObject> {
             let mut hashes = vec![];
 
             let decompressed = split_object_at_zero(decompressed)?;
+            let chunk_size = 0x14;
 
             // TODO: this is still ugly, use a more elegant approach instead
             let mut decompressed_iter = decompressed.iter().enumerate();
@@ -65,12 +66,12 @@ pub fn parse_object(data: &[u8]) -> Result<GitObject> {
                 .next()
             {
                 // slice the array instead of cloning the bytes
-                let end = std::cmp::min(offset + 0x14, decompressed.len());
+                let end = std::cmp::min(offset + chunk_size, decompressed.len());
                 let bytes = &decompressed[offset..end];
                 hashes.push(slice_to_hex(bytes));
 
                 (&mut decompressed_iter)
-                    .skip(0x14 - 2)
+                    .skip(chunk_size - 2)
                     // this next() consumes the last chunk element from the iterator
                     .next();
                 // thus, we skip over the remaining (chunk - 2) bytes in between
