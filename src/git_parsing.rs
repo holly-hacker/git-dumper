@@ -23,7 +23,7 @@ pub fn parse_head(data: &[u8]) -> Result<&str> {
         bail!("HEAD file must start with \"ref: \"");
     }
 
-    let content = (&content[5..]).trim_end();
+    let content = content[5..].trim_end();
 
     if !REGEX_REFS_PATH.is_match(content) {
         bail!("Failed to match refs path in HEAD file");
@@ -54,16 +54,26 @@ pub fn parse_object(data: &[u8]) -> Result<GitObject> {
 
             let mut hashes = vec![];
 
-            // TODO: this is ugly, use a slice-based approach instead
-            let mut decompressed_iter = split_object_at_zero(decompressed)?.iter().peekable();
-            while decompressed_iter.peek().is_some() {
-                let bytes: Vec<u8> = (&mut decompressed_iter)
-                    .skip_while(|&&b| b != b'\0')
-                    .skip(1)
-                    .take(0x14)
-                    .cloned()
-                    .collect();
-                hashes.push(slice_to_hex(&bytes));
+            let decompressed = split_object_at_zero(decompressed)?;
+
+            // TODO: this is still ugly, use a more elegant approach instead
+            let mut decompressed_iter = decompressed.iter().enumerate();
+            while let Some((offset, _)) = (&mut decompressed_iter)
+                .skip_while(|(_, &b)| b != 0)
+                .skip(1)
+                // this next() consumes the first chunk element from the iterator
+                .next()
+            {
+                // slice the array instead of cloning the bytes
+                let end = std::cmp::min(offset + 0x14, decompressed.len());
+                let bytes = &decompressed[offset..end];
+                hashes.push(slice_to_hex(bytes));
+
+                (&mut decompressed_iter)
+                    .skip(0x14 - 2)
+                    // this next() consumes the last chunk element from the iterator
+                    .next();
+                // thus, we skip over the remaining (chunk - 2) bytes in between
             }
 
             Ok(GitObject::Tree(hashes))
@@ -133,9 +143,7 @@ fn peek_object_type(data: &[u8]) -> Result<[u8; 6]> {
 fn split_object_at_zero(data: &[u8]) -> Result<&[u8]> {
     let idx_zero = data
         .iter()
-        .enumerate()
-        .find(|(_, &val)| val == b'\0')
-        .map(|(idx, _)| idx)
+        .position(|&val| val == 0)
         .ok_or_else(|| anyhow!("Malformed object file, could not find null separator"))?;
     let data = &data[idx_zero + 1..];
     Ok(data)
