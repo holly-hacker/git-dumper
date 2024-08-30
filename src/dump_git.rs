@@ -227,7 +227,11 @@ fn queue_new_references(
 }
 
 fn hash_to_url(hash: &str) -> String {
-    assert_eq!(hash.len(), 40);
+    assert_eq!(hash.len(), 40, "Hash is not 40 characters long");
+    assert!(
+        hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "Hash is not hexadecimal"
+    );
     let hash_start = &hash[0..2];
     let hash_end = &hash[2..];
     let path = format!("objects/{hash_start}/{hash_end}");

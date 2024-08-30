@@ -29,6 +29,15 @@ pub fn parse_head(data: &[u8]) -> Result<&str> {
         bail!("Failed to match refs path in HEAD file");
     }
 
+    // check for potential path traversal
+    // a normal git setup should never emit paths with `..` segments
+    if content.split(['/', '\\']).any(|segment| segment == "..") {
+        bail!(
+            "Unexpected path traversal detected in HEAD file: {}",
+            content
+        );
+    }
+
     Ok(content)
 }
 
