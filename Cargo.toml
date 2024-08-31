@@ -1,6 +1,6 @@
 [package]
 name = "git-dumper"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A tool to dump exposed .git directories"
 license = "MIT"
