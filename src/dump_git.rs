@@ -1,11 +1,7 @@
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
-use hyper::{Client, StatusCode};
+use hyper::{Client, Method, Request, StatusCode};
 use hyper_tls::HttpsConnector;
 use regex::Regex;
 use tokio::{
@@ -13,7 +9,10 @@ use tokio::{
     time::sleep,
 };
 
-use crate::git_parsing::{parse_hash, parse_head, parse_log, parse_object, GitObject};
+use crate::{
+    git_parsing::{parse_hash, parse_head, parse_log, parse_object, GitObject},
+    Args,
+};
 
 lazy_static::lazy_static! {
     static ref REGEX_OBJECT_PATH: Regex = Regex::new(r"[\da-f]{2}/[\da-f]{38}").unwrap();
@@ -42,7 +41,9 @@ struct DownloadedFile {
     pub tx: UnboundedSender<DownloadedFile>,
 }
 
-pub async fn download_all(base_url: String, base_path: PathBuf, max_task_count: u16) {
+pub async fn download_all(args: Arc<Args>) {
+    let base_url = &args.url;
+    let base_path = &args.path;
     let mut cache = HashSet::<String>::new();
 
     // TODO: try out unbounded channel too
@@ -75,8 +76,9 @@ pub async fn download_all(base_url: String, base_path: PathBuf, max_task_count: 
 
         let url = format!("{}{}", &base_url, &message.path);
         let base_path = base_path.clone();
+        let cloned_args = args.clone();
         let handle = tokio::spawn(async move {
-            let file_bytes = match download(&url).await {
+            let file_bytes = match download(&url, cloned_args).await {
                 Ok(content) => content,
                 Err(e) => {
                     println!("Error while downloading file {url}: {}", e);
@@ -99,7 +101,7 @@ pub async fn download_all(base_url: String, base_path: PathBuf, max_task_count: 
 
         threads.push(handle);
 
-        while threads.len() >= (max_task_count as usize) {
+        while threads.len() >= (args.tasks as usize) {
             // sleep
             sleep(Duration::from_millis(10)).await;
 
@@ -109,9 +111,25 @@ pub async fn download_all(base_url: String, base_path: PathBuf, max_task_count: 
     }
 }
 
-async fn download(url: &str) -> Result<Vec<u8>> {
+async fn download(url: &str, args: Arc<Args>) -> Result<Vec<u8>> {
     let client = Client::builder().build::<_, hyper::Body>(HttpsConnector::new());
-    let resp = client.get(url.parse().unwrap()).await;
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(url)
+        .header(
+            "User-Agent",
+            args.user_agent
+                .clone()
+                .unwrap_or(
+                    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+                        .into(),
+                )
+                .clone(),
+        )
+        .body(hyper::Body::empty())
+        .expect("Failed to build the request");
+
+    let resp = client.request(req).await;
     match resp {
         Ok(resp) => match resp.status() {
             StatusCode::OK => {
