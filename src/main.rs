@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use clap::Parser;
 
@@ -7,11 +7,13 @@ mod git_parsing;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Cli {
+pub struct Args {
     /// The url of the exposed .git directory
     #[arg()]
     url: String,
 
+    #[arg(short, long)]
+    user_agent: Option<String>,
     /// The directory to download to
     #[arg(default_value = "git-dumped")]
     path: PathBuf,
@@ -23,13 +25,13 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Cli::parse();
+    let args = Args::parse();
 
     // println!("URL: {url}");
     // println!("PATH: {path}");
 
     std::fs::create_dir_all(args.path.join(".git"))?;
-    dump_git::download_all(args.url.clone(), args.path, args.tasks).await;
+    dump_git::download_all(Arc::new(args)).await;
 
     Ok(())
 }
