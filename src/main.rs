@@ -25,10 +25,11 @@ pub struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
-    // println!("URL: {url}");
-    // println!("PATH: {path}");
+    if dbg!(!args.url.ends_with("/")) {
+        args.url.push('/');
+    }
 
     std::fs::create_dir_all(args.path.join(".git"))?;
     dump_git::download_all(Arc::new(args)).await;
