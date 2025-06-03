@@ -1,9 +1,8 @@
 use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
-use hyper::{Client, Method, Request, StatusCode};
-use hyper_tls::HttpsConnector;
 use regex::Regex;
+use reqwest::{Client, StatusCode};
 use tokio::{
     sync::mpsc::{self, UnboundedSender},
     time::sleep,
@@ -112,10 +111,9 @@ pub async fn download_all(args: Arc<Args>) {
 }
 
 async fn download(url: &str, args: Arc<Args>) -> Result<Vec<u8>> {
-    let client = Client::builder().build::<_, hyper::Body>(HttpsConnector::new());
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri(url)
+    let client = Client::new();
+    let req = client
+        .get(url)
         .header(
             "User-Agent",
             args.user_agent
@@ -126,14 +124,14 @@ async fn download(url: &str, args: Arc<Args>) -> Result<Vec<u8>> {
                 )
                 .clone(),
         )
-        .body(hyper::Body::empty())
+        .build()
         .expect("Failed to build the request");
 
-    let resp = client.request(req).await;
+    let resp = client.execute(req).await;
     match resp {
         Ok(resp) => match resp.status() {
             StatusCode::OK => {
-                let bytes = hyper::body::to_bytes(resp).await.unwrap();
+                let bytes = resp.bytes().await.unwrap();
                 Ok(bytes.to_vec())
             }
             StatusCode::NOT_FOUND => {
@@ -164,7 +162,7 @@ fn write_file(base_path: &Path, message_name: &str, message_content: &[u8]) -> R
             path_parent.to_string_lossy()
         )
     })?;
-    std::fs::write(path, &message_content)
+    std::fs::write(path, message_content)
         .with_context(|| format!("Error while trying to write {} to disk", message_name))?;
 
     Ok(())

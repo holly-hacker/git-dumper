@@ -23,7 +23,7 @@ pub fn parse_head(data: &[u8]) -> Result<&str> {
         bail!("HEAD file must start with \"ref: \"");
     }
 
-    let content = (&content[5..]).trim_end();
+    let content = content[5..].trim_end();
 
     if !REGEX_REFS_PATH.is_match(content) {
         bail!("Failed to match refs path in HEAD file");
